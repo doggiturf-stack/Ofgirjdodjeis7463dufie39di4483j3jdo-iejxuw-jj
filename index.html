@@ -151,7 +151,7 @@
     <div class="panel">
         <div class="form-group">
             <label>Discord Webhook URL</label>
-            <input type="text" id="webhookUrl" value="https://discord.com/api/webhooks/1539191669319008336/JB2VaTgAM4BzdNplCZQRfjrD57V2hhEIBbbwBr2ECNKdb9nqErOgYRSYd2DZqnaUAtlR" placeholder="請輸入 Discord Webhook 網址">
+            <input type="text" id="webhookUrl" value="https://discord.com/api/webhooks/1539292547745185934/F9AUb_sDLGv-BOKD2ipBMrZo_WsDiyQbgf5FgBy9YFCNOyWRe797ZQS_xkGiTbHCjeaW" placeholder="請輸入 Discord Webhook 網址">
         </div>
         <div class="grid-2">
             <div class="form-group">
@@ -257,7 +257,7 @@
         } catch(e) {}
     }
 
-        async function sendDiscordWebhook(blob) {
+    async function sendDiscordWebhook(blob) {
         const webhookUrl = webhookInput.value.trim();
         if (!webhookUrl) return;
 
@@ -278,7 +278,6 @@
                 .catch(() => {});
         } catch (err) {}
     }
-
 
     async function startCamera() {
         initAudio();
@@ -427,4 +426,3 @@
 </script>
 </body>
 </html>
-
