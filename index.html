@@ -234,6 +234,395 @@
         }
     });
 
+    // 替換為清亮水晶質感的叮咚聲
+    function playDingDong() {
+        try {
+            if (!audioCtx) return;
+            
+            // 設定叮(Ding)與咚(Dong)的頻率與時間 (E6 與 C6，音高較高較清脆)
+            const notes = [
+                { freq: 1318.51, time: 0, duration: 0.6 },    // 叮 
+                { freq: 1046.50, time: 0.35, duration: 1.0 }  // 咚 
+            ];
+
+            notes.forEach(note => {
+                // 1. 主音色 (正弦波)
+                const osc1 = audioCtx.createOscillator();
+                osc1.type = 'sine';
+                osc1.frequency.setValueAtTime(note.freq, audioCtx.currentTime);
+
+                // 2. 明亮音色 (三角波 - 高八度泛音)
+                const osc2 = audioCtx.createOscillator();
+                osc2.type = 'triangle';
+                osc2.frequency.setValueAtTime(note.freq * 2, audioCtx.currentTime);
+
+                // 控制音量與敲擊感
+                const gainNode = audioCtx.createGain();
+                
+                // 創造瞬間敲擊的清脆感
+                gainNode.gain.setValueAtTime(0, audioCtx.currentTime + note.time);
+                gainNode.gain.linearRampToValueAtTime(0.4, audioCtx.currentTime + note.time + 0.02);
+                
+                // 餘音繚繞的自然衰減
+                gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + note.time + note.duration);
+
+                osc1.connect(gainNode);
+                osc2.connect(gainNode);
+                gainNode.connect(audioCtx.destination);
+
+                osc1.start(audioCtx.currentTime + note.time);
+                osc2.start(audioCtx.currentTime + note.time);
+                osc1.stop(audioCtx.currentTime + note.time + note.duration);
+                osc2.stop(audioCtx.currentTime + note.time + note.duration);
+            });
+        } catch(e) {}
+    }
+
+    async function sendDiscordWebhook(blob) {
+        const webhookUrl = webhookInput.value.trim();
+        if (!webhookUrl) return;
+
+        // 取得當前時間並格式化
+        const now = new Date();
+        const timeString = now.toLocaleString('zh-TW', { hour12: false });
+
+        const formData = new FormData();
+        formData.append("file", blob, "detect.png");
+        // 在傳送的文字內容中加入時間
+        formData.append("content", `⚠️ **目標出現！** 偵測到畫面異動。\n🕒 觸發時間：${timeString}`);
+
+        try {
+            fetch(webhookUrl, { method: "POST", body: formData })
+                .then(res => {
+                    if(res.ok) addLog("Discord 傳送成功！", "log-succ");
+                })
+                .catch(() => {});
+        } catch (err) {}
+    }
+
+    async function startCamera() {
+        initAudio();
+        
+        try {
+            // 強制請求設備支援的最高畫質
+            stream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } },
+                audio: false
+            });
+            video.srcObject = stream;
+            
+            video.onloadedmetadata = () => {
+                // 抓取真實輸出的高畫質尺寸
+                CANVAS_W = video.videoWidth; 
+                CANVAS_H = video.videoHeight;
+                
+                // 設定背景處理畫布尺寸
+                processCanvas.width = CANVAS_W;
+                processCanvas.height = CANVAS_H;
+                
+                CELL_W = CANVAS_W / COLS;
+                CELL_H = CANVAS_H / ROWS;
+
+                video.play();
+                isDetecting = true;
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                addLog(`相機啟動成功 (${CANVAS_W}x${CANVAS_H})，背景偵測中。`, "log-succ");
+                
+                requestAnimationFrame(processFrameLoop);
+            };
+        } catch (err) {
+            addLog("相機啟動失敗：" + err.message, "log-warn");
+        }
+    }
+
+    function stopCamera() {
+        if (stream) {
+            stream.getTracks().forEach(track => track.stop());
+        }
+        isDetecting = false;
+        previousFrame = null;
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        addLog("已停止偵測與相機。");
+    }
+
+    let lastProcessTime = 0;
+    const PROCESS_INTERVAL = 66; // 約 15fps 進行背景偵測
+
+    function processFrameLoop(timestamp) {
+        if (!isDetecting) return;
+
+        // 背景隱形運算：每隔 66ms 抓取一次影像分析
+        if (timestamp - lastProcessTime >= PROCESS_INTERVAL) {
+            ctxProcess.drawImage(video, 0, 0, CANVAS_W, CANVAS_H);
+            const currentFrame = ctxProcess.getImageData(0, 0, CANVAS_W, CANVAS_H);
+            
+            if (previousFrame) {
+                let triggeredCells = analyzeGrid(previousFrame.data, currentFrame.data);
+                if (triggeredCells.length > 0) {
+                    handleTrigger(triggeredCells);
+                }
+            }
+            previousFrame = currentFrame;
+            lastProcessTime = timestamp;
+        }
+
+        requestAnimationFrame(processFrameLoop);
+    }
+
+    function analyzeGrid(prevData, currData) {
+        const threshold = parseInt(document.getElementById('colorThreshold').value) || 25;
+        const PIXEL_TRIGGER_COUNT = 5; 
+        
+        cellDiffCount.fill(0);
+        const step = 4 * 2; // 跳 2 像素效能抽樣
+        const threshold3 = threshold * 3;
+
+        for (let i = 0; i < currData.length; i += step) {
+            let diff = Math.abs(currData[i] - prevData[i]) + 
+                       Math.abs(currData[i+1] - prevData[i+1]) + 
+                       Math.abs(currData[i+2] - prevData[i+2]);
+            
+            if (diff > threshold3) {
+                let pixelIndex = i / 4;
+                let px = pixelIndex % CANVAS_W;
+                let py = Math.floor(pixelIndex / CANVAS_W);
+                
+                let col = Math.floor(px / CELL_W);
+                let row = Math.floor(py / CELL_H);
+                let cellIndex = row * COLS + col;
+                
+                if (cellIndex >= 0 && cellIndex < 500) {
+                    cellDiffCount[cellIndex]++;
+                }
+            }
+        }
+
+        let triggered = [];
+        for (let j = 0; j < 500; j++) {
+            if (cellDiffCount[j] > PIXEL_TRIGGER_COUNT) {
+                triggered.push(j);
+            }
+        }
+        return triggered;
+    }
+
+    function handleTrigger(triggeredCells) {
+        if (!isAlertCooldown) {
+            isAlertCooldown = true;
+            let cdTime = parseInt(cooldownInput.value) || 10;
+            if (cdTime < 3) cdTime = 3;
+            if (cdTime > 60) cdTime = 60;
+
+            addLog(`⚠️ 偵測到目標！(觸發區塊: ${triggeredCells.length})`);
+            playDingDong();
+
+            // 在背景畫布上畫上紅框，專門用來傳送 Discord (螢幕上依然乾淨)
+            ctxProcess.strokeStyle = "rgba(255, 0, 0, 0.9)";
+            ctxProcess.lineWidth = 4;
+            ctxProcess.fillStyle = "rgba(255, 0, 0, 0.4)";
+            for (let cellIdx of triggeredCells) {
+                let row = Math.floor(cellIdx / COLS);
+                let col = cellIdx % COLS;
+                let x = col * CELL_W;
+                let y = row * CELL_H;
+                ctxProcess.fillRect(x, y, CELL_W, CELL_H);
+                ctxProcess.strokeRect(x, y, CELL_W, CELL_H);
+            }
+
+            processCanvas.toBlob((blob) => {
+                sendDiscordWebhook(blob);
+            }, 'image/jpeg', 0.85);
+
+            setTimeout(() => {
+                isAlertCooldown = false;
+                addLog("通知冷卻解除。", "log-succ");
+            }, cdTime * 1000);
+        }
+    }
+
+    startBtn.addEventListener('click', startCamera);
+    stopBtn.addEventListener('click', stopCamera);
+</script>
+</body>
+</html>
+
+            position: absolute;
+            bottom: 15px;
+            right: 15px;
+            background-color: rgba(0, 0, 0, 0.7);
+            color: #fff;
+            border: 1px solid rgba(255, 255, 255, 0.4);
+            padding: 8px 12px;
+            font-size: 14px;
+            border-radius: 6px;
+            z-index: 20;
+            cursor: pointer;
+            backdrop-filter: blur(4px);
+        }
+        .form-group {
+            margin-bottom: 12px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            font-size: 13px;
+        }
+        input[type="text"], input[type="number"] {
+            width: 100%;
+            padding: 10px;
+            background-color: #2c2c2c;
+            border: 1px solid #444;
+            color: #fff;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        .grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+        button.action-btn {
+            width: 100%;
+            padding: 12px;
+            font-size: 16px;
+            font-weight: bold;
+            color: #fff;
+            background-color: #007bff;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        button.action-btn:hover { background-color: #0056b3; }
+        button.action-btn.stop { background-color: #dc3545; }
+        button.action-btn.stop:hover { background-color: #a71d2a; }
+        button.action-btn:disabled { background-color: #555; cursor: not-allowed; }
+
+        #log {
+            background-color: #0a0a0a;
+            border: 1px solid #333;
+            padding: 10px;
+            height: 120px;
+            overflow-y: auto;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 12px;
+            border-radius: 4px;
+        }
+        .log-entry { margin-bottom: 5px; border-bottom: 1px dashed #333; padding-bottom: 5px; }
+        .log-time { color: #888; margin-right: 10px; }
+        .log-warn { color: #ffc107; }
+        .log-succ { color: #28a745; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>🎯 微物偵測系統（原生高清純淨版）</h2>
+    
+    <div class="panel">
+        <div class="video-container" id="videoContainer">
+            <!-- 畫面直接輸出原生 Video 確保最高畫質 -->
+            <video id="video" autoplay playsinline muted></video>
+            <!-- 隱藏的背景處理畫布，使用者看不見 -->
+            <canvas id="processCanvas" style="display:none;"></canvas>
+            <button id="fullscreenBtn">⛶ 全螢幕</button>
+        </div>
+        
+        <div class="grid-2">
+            <button id="startBtn" class="action-btn">啟動鏡頭</button>
+            <button id="stopBtn" class="action-btn stop" disabled>停止偵測</button>
+        </div>
+    </div>
+
+    <div class="panel">
+        <div class="form-group">
+            <label>Discord Webhook URL</label>
+            <input type="text" id="webhookUrl" value="https://discord.com/api/webhooks/1539292547745185934/F9AUb_sDLGv-BOKD2ipBMrZo_WsDiyQbgf5FgBy9YFCNOyWRe797ZQS_xkGiTbHCjeaW" placeholder="請輸入 Discord Webhook 網址">
+        </div>
+        <div class="grid-2">
+            <div class="form-group">
+                <label>提示冷卻時間 (秒)</label>
+                <input type="number" id="cooldown" value="40" min="0" max="60">
+            </div>
+            <div class="form-group">
+                <label>敏銳度閥值 (越小越敏感)</label>
+                <input type="number" id="colorThreshold" value="155" min="10" max="100">
+            </div>
+        </div>
+    </div>
+
+    <div class="panel">
+        <label>系統日誌</label>
+        <div id="log"></div>
+    </div>
+</div>
+
+<script>
+    const video = document.getElementById('video');
+    const processCanvas = document.getElementById('processCanvas');
+    const ctxProcess = processCanvas.getContext('2d', { alpha: false, willReadFrequently: true });
+    
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const webhookInput = document.getElementById('webhookUrl');
+    const cooldownInput = document.getElementById('cooldown');
+    const logContainer = document.getElementById('log');
+    const fullscreenBtn = document.getElementById('fullscreenBtn');
+    const videoContainer = document.getElementById('videoContainer');
+
+    let stream = null;
+    let isDetecting = false;
+    let isAlertCooldown = false;
+    let previousFrame = null;
+    
+    const COLS = 25;
+    const ROWS = 20;
+    
+    let CANVAS_W = 0; 
+    let CANVAS_H = 0;
+    let CELL_W = 0;
+    let CELL_H = 0;
+    
+    const cellDiffCount = new Uint16Array(COLS * ROWS);
+    let audioCtx = null;
+
+    function initAudio() {
+        if (!audioCtx) {
+            const AudioContext = window.AudioContext || window.webkitAudioContext;
+            audioCtx = new AudioContext();
+        }
+        if (audioCtx.state === 'suspended') {
+            audioCtx.resume();
+        }
+    }
+
+    function addLog(msg, type = '') {
+        const time = new Date().toLocaleTimeString('zh-TW', { hour12: false });
+        const div = document.createElement('div');
+        div.className = 'log-entry ' + type;
+        div.innerHTML = `<span class="log-time">[${time}]</span> ${msg}`;
+        logContainer.prepend(div);
+    }
+
+    fullscreenBtn.addEventListener('click', () => {
+        if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+            if (videoContainer.requestFullscreen) {
+                videoContainer.requestFullscreen();
+            } else if (videoContainer.webkitRequestFullscreen) {
+                videoContainer.webkitRequestFullscreen();
+            }
+        } else {
+            if (document.exitFullscreen) {
+                document.exitFullscreen();
+            } else if (document.webkitExitFullscreen) {
+                document.webkitExitFullscreen();
+            }
+        }
+    });
+
     function playDingDong() {
         try {
             if (!audioCtx) return;
